@@ -5,12 +5,17 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import UberBackend.UberBookingService.apis.LocationServiceApi;
 import UberBackend.UberBookingService.apis.UberSocketApi;
+import UberBackend.UberBookingService.dto.BookingConfirmedEvent;
 import UberBackend.UberBookingService.dto.CreateBookingDto;
 import UberBackend.UberBookingService.dto.CreateBookingResponseDto;
 import UberBackend.UberBookingService.repositories.BookingRepository;
@@ -42,7 +47,12 @@ public class BookingServiceImpl implements BookingService{
 	private DriverRepository driverRepository;
 	private final UberSocketApi uberSocketApi;
 //	private static final String LOCATION_SERVICE="http://localhost:1003";
-	
+	@Autowired
+	private KafkaTemplate<String, String> kafkaTemplate;
+
+	@Autowired
+	private ObjectMapper objectMapper;
+
 	public BookingServiceImpl(PassengerRepository passengerRepository,
 			BookingRepository bookingRepository,
 			RestTemplate restTemplate,
@@ -108,7 +118,8 @@ public class BookingServiceImpl implements BookingService{
           System.out.println(driverLocationDto.getDriverId() + " " +
                            "lat: " + driverLocationDto.getLatitude() + " " +
                            "longi: " + driverLocationDto.getLongitude());
-           });
+           
+           
             ExactLocation startLoc = new ExactLocation(requestDto.getLatitude(), requestDto.getLongitude());
             ExactLocation endLoc = new ExactLocation(bookingDetails.getEndLocation().getLatitude(), bookingDetails.getEndLocation().getLongitude());
             
@@ -117,11 +128,12 @@ public class BookingServiceImpl implements BookingService{
                     .passengerId(passengerId)
                     .startLocation(startLoc)
                     .endLocation(endLoc) // or a real destination if you have one
-                 //   .driverIds(List.of(driverId)) // only the current driver
+                   .driverIds(List.of(Long.parseLong(driverLocationDto.getDriverId())))  // only the current driver
                     .bookingId(bookingId)
                     .build();
 
                 raiseRideRequestAsync(rideRequestDto);
+            });
             }
                else {
         	    System.out.println("Request failed with status code: " + response.code());
@@ -153,11 +165,29 @@ public class BookingServiceImpl implements BookingService{
        //driverRepository.update to driver that he is unavailable currently to take another ride
 	    Optional<Booking> booking = bookingRepository.findById(bookingId);
 
-	    return UpdateBookingResponseDto.builder()
-	        .bookingId(bookingId)
-	        .status(booking.get().getBookingStatus())
-	        .driver(Optional.ofNullable(booking.get().getDriver()))
-	        .build();
+	    UpdateBookingResponseDto responseDto = UpdateBookingResponseDto.builder()
+	            .bookingId(bookingId)
+	            .status(booking.get().getBookingStatus())
+	            .driver(Optional.ofNullable(booking.get().getDriver()))
+	            .build();
+
+	    // 🔥 Publish event for notification
+	    try {
+	        BookingConfirmedEvent event = new BookingConfirmedEvent();
+	        event.setBookingId(bookingId);
+	        event.setPassengerId(booking.get().getPassenger().getId());
+	        event.setDriverId(driver.getId());
+	        event.setDriverName(driver.getName());
+	        event.setStatus("SCHEDULED");
+
+	        String message = objectMapper.writeValueAsString(event);
+	        kafkaTemplate.send("booking-confirmed-topic", message);
+	        System.out.println("📤 Sent BookingConfirmedEvent: " + message);
+	    } catch (Exception e) {
+	        e.printStackTrace();
+	    }
+
+	    return responseDto;
 	}
 
 
